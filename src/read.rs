@@ -292,6 +292,39 @@ fn make_reader(
 }
 
 impl<R: Read + io::Seek> ZipArchive<R> {
+    pub(crate) fn merge_contents<W: Write + io::Seek>(
+        &mut self,
+        mut w: W,
+    ) -> ZipResult<Vec<ZipFileData>> {
+        let mut new_files = self.shared.files.clone();
+        if new_files.is_empty() {
+            return Ok(Vec::new());
+        }
+        /* File headers for the source should start at the beginning of the file! */
+        assert_eq!(0, new_files[0].header_start);
+
+        let new_initial_header_start = w.stream_position()?;
+        /* Push back file header starts for all entries in the covered files. */
+        for f in new_files.iter_mut() {
+            f.header_start = f.header_start.checked_add(new_initial_header_start).ok_or(
+                ZipError::InvalidArchive("new header start from merge would have been too large"),
+            )?;
+        }
+
+        /* Find the end of the file data. */
+        let (_, cde_start_pos) = spec::CentralDirectoryEnd::find_and_parse(&mut self.reader)?;
+
+        /* Rewind to the beginning of the file. */
+        self.reader.rewind()?;
+        /* Produce a Read that reads bytes up until the start of the central directory header. */
+        let mut limited_raw = (&mut self.reader as &mut dyn Read).take(cde_start_pos);
+        /* Copy over file data from source archive directly. */
+        io::copy(&mut limited_raw, &mut w)?;
+
+        /* Return the files we've just written to the data stream. */
+        Ok(new_files)
+    }
+
     /// Get the directory start offset and number of files. This is done in a
     /// separate function to ease the control flow design.
     pub(crate) fn get_directory_counts(

@@ -410,7 +410,11 @@ impl<W: Write + io::Seek> ZipWriter<W> {
             self.files.push(file);
         }
         if let Some(keys) = options.encrypt_with {
-            let mut zipwriter = crate::zipcrypto::ZipCryptoWriter { writer: core::mem::replace(&mut self.inner, GenericZipWriter::Closed).unwrap(), buffer: vec![], keys };
+            let mut zipwriter = crate::zipcrypto::ZipCryptoWriter {
+                writer: core::mem::replace(&mut self.inner, GenericZipWriter::Closed).unwrap(),
+                buffer: vec![],
+                keys,
+            };
             let mut crypto_header = [0u8; 12];
 
             zipwriter.write_all(&crypto_header)?;
@@ -428,10 +432,11 @@ impl<W: Write + io::Seek> ZipWriter<W> {
         match core::mem::replace(&mut self.inner, GenericZipWriter::Closed) {
             GenericZipWriter::Storer(MaybeEncrypted::Encrypted(writer)) => {
                 let crc32 = self.stats.hasher.clone().finalize();
-                self.inner = GenericZipWriter::Storer(MaybeEncrypted::Unencrypted(writer.finish(crc32)?))
+                self.inner =
+                    GenericZipWriter::Storer(MaybeEncrypted::Unencrypted(writer.finish(crc32)?))
             }
             GenericZipWriter::Storer(w) => self.inner = GenericZipWriter::Storer(w),
-            _ => unreachable!()
+            _ => unreachable!(),
         }
         let writer = self.inner.get_plain();
 
@@ -452,6 +457,27 @@ impl<W: Write + io::Seek> ZipWriter<W> {
 
         self.writing_to_file = false;
         self.writing_raw = false;
+        Ok(())
+    }
+
+    pub fn merge_archive<R>(&mut self, mut source: ZipArchive<R>) -> ZipResult<()>
+    where
+        R: Read + io::Seek,
+    {
+        self.finish_file()?;
+
+        /* Ensure we accept the file contents on faith (and avoid overwriting the data).
+         * See raw_copy_file_rename(). */
+        self.writing_to_file = true;
+        self.writing_raw = true;
+
+        let writer = self.inner.get_plain();
+        /* Get the file entries from the source archive. */
+        let mut new_files = source.merge_contents(writer)?;
+        /* These file entries are now ours! */
+        self.files.append(&mut new_files);
+        assert!(new_files.is_empty());
+
         Ok(())
     }
 

@@ -40,6 +40,7 @@ pub(crate) mod zip_archive {
     pub(crate) struct Shared {
         pub(super) files: super::IndexMap<String, super::ZipFileData>,
         pub(super) offset: u64,
+        pub(super) cde_start: u64,
         pub(super) comment: Vec<u8>,
     }
 
@@ -334,20 +335,14 @@ impl<R: Read + io::Seek> ZipArchive<R> {
             })
             .collect::<Result<(), ZipError>>()?;
 
-        /* Find the end of the file data. */
-        let (cde, cde_end_pos) = spec::CentralDirectoryEnd::find_and_parse(&mut self.reader)?;
-        let cde_offset = cde_end_pos - (cde.central_directory_size as u64);
-        /* FIXME: this check is superfluous. */
-        if cde_offset <= (u32::MAX as u64) {
-            assert_eq!(cde_offset as u32, cde.central_directory_offset);
-        }
-
         /* Rewind to the beginning of the file. */
         self.reader.rewind()?;
+        /* Find the end of the file data. */
+        let cde_start_pos = self.shared.cde_start;
         /* Produce a Read that reads bytes up until the start of the central directory header.
          * This "as &mut dyn Read" trick is used elsewhere to avoid having to clone the underlying
          * handle, which it really shouldn't need to anyway. */
-        let mut limited_raw = (&mut self.reader as &mut dyn Read).take(cde_offset);
+        let mut limited_raw = (&mut self.reader as &mut dyn Read).take(cde_start_pos);
         /* Copy over file data from source archive directly. */
         io::copy(&mut limited_raw, &mut w)?;
 
@@ -496,6 +491,7 @@ impl<R: Read + io::Seek> ZipArchive<R> {
         let shared = Arc::new(zip_archive::Shared {
             files,
             offset: archive_offset,
+            cde_start: directory_start,
             comment: footer.zip_file_comment,
         });
 

@@ -309,15 +309,28 @@ impl<R: Read + io::Seek> ZipArchive<R> {
             f.header_start = f.header_start.checked_add(new_initial_header_start).ok_or(
                 ZipError::InvalidArchive("new header start from merge would have been too large"),
             )?;
+            f.central_header_start = 0;
+            let new_data_start = f
+                .data_start
+                .load()
+                .checked_add(new_initial_header_start)
+                .ok_or(ZipError::InvalidArchive(
+                    "new data start from merge would have been too large",
+                ))?;
+            f.data_start.store(new_data_start);
         }
 
         /* Find the end of the file data. */
-        let (_, cde_start_pos) = spec::CentralDirectoryEnd::find_and_parse(&mut self.reader)?;
+        let (cde, cde_end_pos) = spec::CentralDirectoryEnd::find_and_parse(&mut self.reader)?;
+        let cde_offset = cde_end_pos - (cde.central_directory_size as u64);
+        if cde_offset <= (u32::MAX as u64) {
+            assert_eq!(cde_offset as u32, cde.central_directory_offset);
+        }
 
         /* Rewind to the beginning of the file. */
         self.reader.rewind()?;
         /* Produce a Read that reads bytes up until the start of the central directory header. */
-        let mut limited_raw = (&mut self.reader as &mut dyn Read).take(cde_start_pos);
+        let mut limited_raw = (&mut self.reader as &mut dyn Read).take(cde_offset);
         /* Copy over file data from source archive directly. */
         io::copy(&mut limited_raw, &mut w)?;
 

@@ -10,6 +10,7 @@ use crate::spec;
 use crate::types::{AesMode, AesVendorVersion, AtomicU64, DateTime, System, ZipFileData};
 use crate::zipcrypto::{ZipCryptoReader, ZipCryptoReaderValid, ZipCryptoValidator};
 use byteorder::{LittleEndian, ReadBytesExt};
+use rayon::prelude::*;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{self, prelude::*};
@@ -300,36 +301,53 @@ impl<R: Read + io::Seek> ZipArchive<R> {
         if new_files.is_empty() {
             return Ok(Vec::new());
         }
-        /* File headers for the source should start at the beginning of the file! */
-        assert_eq!(0, new_files[0].header_start);
+        /* The first file header will probably start at the beginning of the file, but zip doesn't
+         * enforce that, and executable zips like PEX files will have a shebang line. */
+        /* assert_eq!(0, new_files[0].header_start); */
 
         let new_initial_header_start = w.stream_position()?;
         /* Push back file header starts for all entries in the covered files. */
-        for f in new_files.iter_mut() {
-            f.header_start = f.header_start.checked_add(new_initial_header_start).ok_or(
-                ZipError::InvalidArchive("new header start from merge would have been too large"),
-            )?;
-            f.central_header_start = 0;
-            let new_data_start = f
-                .data_start
-                .load()
-                .checked_add(new_initial_header_start)
-                .ok_or(ZipError::InvalidArchive(
-                    "new data start from merge would have been too large",
-                ))?;
-            f.data_start.store(new_data_start);
-        }
+        new_files
+            .par_iter_mut()
+            .map(|f| {
+                /* This is probably the only really important thing to change. */
+                f.header_start = f.header_start.checked_add(new_initial_header_start).ok_or(
+                    ZipError::InvalidArchive(
+                        "new header start from merge would have been too large",
+                    ),
+                )?;
+                /* This is only ever used internally to cache metadata lookups (it's not part of the zip
+                 * spec), and 0 is the sentinel value. */
+                f.central_header_start = 0;
+                /* This is an atomic variable so it can be updated from another thread in the
+                 * implementation (which is good!). */
+                let new_data_start = f
+                    .data_start
+                    /* NB: it's annoying there's no .checked_fetch_add(), but we don't need it here
+                     * because nothing else has any reference to this data. */
+                    .load()
+                    .checked_add(new_initial_header_start)
+                    .ok_or(ZipError::InvalidArchive(
+                        "new data start from merge would have been too large",
+                    ))?;
+                f.data_start.store(new_data_start);
+                Ok(())
+            })
+            .collect::<Result<(), ZipError>>()?;
 
         /* Find the end of the file data. */
         let (cde, cde_end_pos) = spec::CentralDirectoryEnd::find_and_parse(&mut self.reader)?;
         let cde_offset = cde_end_pos - (cde.central_directory_size as u64);
+        /* FIXME: this check is superfluous. */
         if cde_offset <= (u32::MAX as u64) {
             assert_eq!(cde_offset as u32, cde.central_directory_offset);
         }
 
         /* Rewind to the beginning of the file. */
         self.reader.rewind()?;
-        /* Produce a Read that reads bytes up until the start of the central directory header. */
+        /* Produce a Read that reads bytes up until the start of the central directory header.
+         * This "as &mut dyn Read" trick is used elsewhere to avoid having to clone the underlying
+         * handle, which it really shouldn't need to anyway. */
         let mut limited_raw = (&mut self.reader as &mut dyn Read).take(cde_offset);
         /* Copy over file data from source archive directly. */
         io::copy(&mut limited_raw, &mut w)?;
@@ -343,7 +361,7 @@ impl<R: Read + io::Seek> ZipArchive<R> {
     pub(crate) fn get_directory_counts(
         reader: &mut R,
         footer: &spec::CentralDirectoryEnd,
-        cde_start_pos: u64,
+        cde_end_pos: u64,
     ) -> ZipResult<(u64, u64, usize)> {
         // See if there's a ZIP64 footer. The ZIP64 locator if present will
         // have its signature 20 bytes in front of the standard footer. The
@@ -378,7 +396,7 @@ impl<R: Read + io::Seek> ZipArchive<R> {
                 // offsets all being too small. Get the amount of error by comparing
                 // the actual file position we found the CDE at with the offset
                 // recorded in the CDE.
-                let archive_offset = cde_start_pos
+                let archive_offset = cde_end_pos
                     .checked_sub(footer.central_directory_size as u64)
                     .and_then(|x| x.checked_sub(footer.central_directory_offset as u64))
                     .ok_or(ZipError::InvalidArchive(
@@ -408,7 +426,7 @@ impl<R: Read + io::Seek> ZipArchive<R> {
                 // read::CentralDirectoryEnd::find_and_parse, except now we search
                 // forward.
 
-                let search_upper_bound = cde_start_pos
+                let search_upper_bound = cde_end_pos
                     .checked_sub(60) // minimum size of Zip64CentralDirectoryEnd + Zip64CentralDirectoryEndLocator
                     .ok_or(ZipError::InvalidArchive(
                         "File cannot contain ZIP64 central directory end",
@@ -445,18 +463,18 @@ impl<R: Read + io::Seek> ZipArchive<R> {
     ///
     /// This uses the central directory record of the ZIP file, and ignores local file headers
     pub fn new(mut reader: R) -> ZipResult<ZipArchive<R>> {
-        let (footer, cde_start_pos) = spec::CentralDirectoryEnd::find_and_parse(&mut reader)?;
+        let (footer, cde_end_pos) = spec::CentralDirectoryEnd::find_and_parse(&mut reader)?;
 
         if !footer.record_too_small() && footer.disk_number != footer.disk_with_central_directory {
             return unsupported_zip_error("Support for multi-disk files is not implemented");
         }
 
         let (archive_offset, directory_start, number_of_files) =
-            Self::get_directory_counts(&mut reader, &footer, cde_start_pos)?;
+            Self::get_directory_counts(&mut reader, &footer, cde_end_pos)?;
 
         // If the parsed number of files is greater than the offset then
         // something fishy is going on and we shouldn't trust number_of_files.
-        let file_capacity = if number_of_files > cde_start_pos as usize {
+        let file_capacity = if number_of_files > cde_end_pos as usize {
             0
         } else {
             number_of_files

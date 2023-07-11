@@ -281,7 +281,7 @@ impl ZipWriterStats {
 impl<A: Read + Write + io::Seek> ZipWriter<A> {
     /// Initializes the archive from an existing ZIP archive, making it ready for append.
     pub fn new_append(mut readwriter: A) -> ZipResult<ZipWriter<A>> {
-        let (footer, cde_start_pos) = spec::CentralDirectoryEnd::find_and_parse(&mut readwriter)?;
+        let (footer, cde_end_pos) = spec::CentralDirectoryEnd::find_and_parse(&mut readwriter)?;
 
         if footer.disk_number != footer.disk_with_central_directory {
             return Err(ZipError::UnsupportedArchive(
@@ -290,7 +290,7 @@ impl<A: Read + Write + io::Seek> ZipWriter<A> {
         }
 
         let (archive_offset, directory_start, number_of_files) =
-            ZipArchive::get_directory_counts(&mut readwriter, &footer, cde_start_pos)?;
+            ZipArchive::get_directory_counts(&mut readwriter, &footer, cde_end_pos)?;
 
         if readwriter
             .seek(io::SeekFrom::Start(directory_start))
@@ -415,7 +415,7 @@ impl<W: Write + io::Seek> ZipWriter<W> {
                 buffer: vec![],
                 keys,
             };
-            let mut crypto_header = [0u8; 12];
+            let crypto_header = [0u8; 12];
 
             zipwriter.write_all(&crypto_header)?;
             self.inner = GenericZipWriter::Storer(MaybeEncrypted::Encrypted(zipwriter));
@@ -460,6 +460,11 @@ impl<W: Write + io::Seek> ZipWriter<W> {
         Ok(())
     }
 
+    /// Copy over the entire contents of another archive verbatim.
+    ///
+    /// This method parses the central directory records at the end of the stream in order to
+    /// extract file metadata, then simply performs a single big [`io::copy()`](io::copy) to
+    /// transfer all the actual file contents without any decompression or decryption.
     pub fn merge_archive<R>(&mut self, mut source: ZipArchive<R>) -> ZipResult<()>
     where
         R: Read + io::Seek,

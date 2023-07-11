@@ -5,14 +5,14 @@ use crate::aes::{AesReader, AesReaderValid};
 use crate::compression::CompressionMethod;
 use crate::cp437::FromCp437;
 use crate::crc32::Crc32Reader;
-use crate::result::{InvalidPassword, ZipError, ZipResult};
+use crate::result::{ZipError, ZipResult};
 use crate::spec;
 use crate::types::{AesMode, AesVendorVersion, AtomicU64, DateTime, System, ZipFileData};
 use crate::zipcrypto::{ZipCryptoReader, ZipCryptoReaderValid, ZipCryptoValidator};
 use byteorder::{LittleEndian, ReadBytesExt};
+use indexmap::IndexMap;
 use rayon::prelude::*;
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::io::{self, prelude::*};
 use std::path::Path;
 use std::sync::Arc;
@@ -38,8 +38,7 @@ pub(crate) mod zip_archive {
     /// Extract immutable data from `ZipArchive` to make it cheap to clone
     #[derive(Debug)]
     pub(crate) struct Shared {
-        pub(super) files: Vec<super::ZipFileData>,
-        pub(super) names_map: super::HashMap<String, usize>,
+        pub(super) files: super::IndexMap<String, super::ZipFileData>,
         pub(super) offset: u64,
         pub(super) comment: Vec<u8>,
     }
@@ -216,7 +215,7 @@ fn make_crypto_reader<'a>(
     password: Option<&[u8]>,
     aes_info: Option<(AesMode, AesVendorVersion)>,
     #[cfg(feature = "aes-crypto")] compressed_size: u64,
-) -> ZipResult<Result<CryptoReader<'a>, InvalidPassword>> {
+) -> ZipResult<CryptoReader<'a>> {
     #[allow(deprecated)]
     {
         if let CompressionMethod::Unsupported(_) = compression_method {
@@ -234,7 +233,7 @@ fn make_crypto_reader<'a>(
         #[cfg(feature = "aes-crypto")]
         (Some(password), Some((aes_mode, vendor_version))) => {
             match AesReader::new(reader, aes_mode, compressed_size).validate(password)? {
-                None => return Ok(Err(InvalidPassword)),
+                None => return Err(ZipError::InvalidPassword),
                 Some(r) => CryptoReader::Aes {
                     reader: r,
                     vendor_version,
@@ -248,14 +247,14 @@ fn make_crypto_reader<'a>(
                 ZipCryptoValidator::PkzipCrc32(crc32)
             };
             match ZipCryptoReader::new(reader, password).validate(validator)? {
-                None => return Ok(Err(InvalidPassword)),
+                None => return Err(ZipError::InvalidPassword),
                 Some(r) => CryptoReader::ZipCrypto(r),
             }
         }
-        (None, Some(_)) => return Ok(Err(InvalidPassword)),
+        (None, Some(_)) => return Err(ZipError::InvalidPassword),
         (None, None) => CryptoReader::Plaintext(reader),
     };
-    Ok(Ok(reader))
+    Ok(reader)
 }
 
 fn make_reader(
@@ -296,10 +295,10 @@ impl<R: Read + io::Seek> ZipArchive<R> {
     pub(crate) fn merge_contents<W: Write + io::Seek>(
         &mut self,
         mut w: W,
-    ) -> ZipResult<Vec<ZipFileData>> {
+    ) -> ZipResult<IndexMap<String, ZipFileData>> {
         let mut new_files = self.shared.files.clone();
         if new_files.is_empty() {
-            return Ok(Vec::new());
+            return Ok(new_files);
         }
         /* The first file header will probably start at the beginning of the file, but zip doesn't
          * enforce that, and executable zips like PEX files will have a shebang line. */
@@ -309,7 +308,7 @@ impl<R: Read + io::Seek> ZipArchive<R> {
         /* Push back file header starts for all entries in the covered files. */
         new_files
             .par_iter_mut()
-            .map(|f| {
+            .map(|(_, f)| {
                 /* This is probably the only really important thing to change. */
                 f.header_start = f.header_start.checked_add(new_initial_header_start).ok_or(
                     ZipError::InvalidArchive(
@@ -480,8 +479,7 @@ impl<R: Read + io::Seek> ZipArchive<R> {
             number_of_files
         };
 
-        let mut files = Vec::with_capacity(file_capacity);
-        let mut names_map = HashMap::with_capacity(file_capacity);
+        let mut files = IndexMap::with_capacity(file_capacity);
 
         if reader.seek(io::SeekFrom::Start(directory_start)).is_err() {
             return Err(ZipError::InvalidArchive(
@@ -491,13 +489,12 @@ impl<R: Read + io::Seek> ZipArchive<R> {
 
         for _ in 0..number_of_files {
             let file = central_header_to_zip_file(&mut reader, archive_offset)?;
-            names_map.insert(file.file_name.clone(), files.len());
-            files.push(file);
+            /* Ignoring duplicate entry names. */
+            files.insert(file.file_name.clone(), file);
         }
 
         let shared = Arc::new(zip_archive::Shared {
             files,
-            names_map,
             offset: archive_offset,
             comment: footer.zip_file_comment,
         });
@@ -568,7 +565,7 @@ impl<R: Read + io::Seek> ZipArchive<R> {
 
     /// Returns an iterator over all the file and directory names in this archive.
     pub fn file_names(&self) -> impl Iterator<Item = &str> {
-        self.shared.names_map.keys().map(|s| s.as_str())
+        self.shared.files.keys().map(|s| s.as_str())
     }
 
     /// Search for a file entry by name, decrypt with given password
@@ -588,27 +585,24 @@ impl<R: Read + io::Seek> ZipArchive<R> {
         &'a mut self,
         name: &str,
         password: &[u8],
-    ) -> ZipResult<Result<ZipFile<'a>, InvalidPassword>> {
-        self.by_name_with_optional_password(name, Some(password))
+    ) -> ZipResult<ZipFile<'a>> {
+        let index = self.get_index_by_name(name)?;
+        self.unwrap_entry(index, Some(password))
     }
 
     /// Search for a file entry by name
     pub fn by_name<'a>(&'a mut self, name: &str) -> ZipResult<ZipFile<'a>> {
-        Ok(self.by_name_with_optional_password(name, None)?.unwrap())
+        let index = self.get_index_by_name(name)?;
+        self.unwrap_entry(index, None)
     }
 
-    fn by_name_with_optional_password<'a>(
-        &'a mut self,
-        name: &str,
-        password: Option<&[u8]>,
-    ) -> ZipResult<Result<ZipFile<'a>, InvalidPassword>> {
-        let index = match self.shared.names_map.get(name) {
-            Some(index) => *index,
-            None => {
-                return Err(ZipError::FileNotFound);
-            }
-        };
-        self.by_index_with_optional_password(index, password)
+    fn get_index_by_name<'a>(&'a self, name: &str) -> ZipResult<usize> {
+        let index = self
+            .shared
+            .files
+            .get_index_of(name)
+            .ok_or(ZipError::FileNotFound)?;
+        Ok(index)
     }
 
     /// Get a contained file by index, decrypt with given password
@@ -628,42 +622,39 @@ impl<R: Read + io::Seek> ZipArchive<R> {
         &'a mut self,
         file_number: usize,
         password: &[u8],
-    ) -> ZipResult<Result<ZipFile<'a>, InvalidPassword>> {
-        self.by_index_with_optional_password(file_number, Some(password))
+    ) -> ZipResult<ZipFile<'a>> {
+        self.unwrap_entry(file_number, Some(password))
     }
 
     /// Get a contained file by index
     pub fn by_index(&mut self, file_number: usize) -> ZipResult<ZipFile<'_>> {
-        Ok(self
-            .by_index_with_optional_password(file_number, None)?
-            .unwrap())
+        self.unwrap_entry(file_number, None)
     }
 
     /// Get a contained file by index without decompressing it
     pub fn by_index_raw(&mut self, file_number: usize) -> ZipResult<ZipFile<'_>> {
         let reader = &mut self.reader;
-        self.shared
+        let (_, data) = self
+            .shared
             .files
-            .get(file_number)
-            .ok_or(ZipError::FileNotFound)
-            .and_then(move |data| {
-                Ok(ZipFile {
-                    crypto_reader: None,
-                    reader: ZipFileReader::Raw(find_content(data, reader)?),
-                    data: Cow::Borrowed(data),
-                })
-            })
+            .get_index(file_number)
+            .ok_or(ZipError::FileNotFound)?;
+        Ok(ZipFile {
+            crypto_reader: None,
+            reader: ZipFileReader::Raw(find_content(data, reader)?),
+            data: Cow::Borrowed(data),
+        })
     }
 
-    fn by_index_with_optional_password<'a>(
+    fn unwrap_entry<'a>(
         &'a mut self,
         file_number: usize,
         mut password: Option<&[u8]>,
-    ) -> ZipResult<Result<ZipFile<'a>, InvalidPassword>> {
-        let data = self
+    ) -> ZipResult<ZipFile<'a>> {
+        let (_, data) = self
             .shared
             .files
-            .get(file_number)
+            .get_index(file_number)
             .ok_or(ZipError::FileNotFound)?;
 
         match (password, data.encrypted) {
@@ -673,7 +664,7 @@ impl<R: Read + io::Seek> ZipArchive<R> {
         }
         let limit_reader = find_content(data, &mut self.reader)?;
 
-        match make_crypto_reader(
+        let crypto_reader = make_crypto_reader(
             data.compression_method,
             data.crc32,
             data.last_modified_time,
@@ -683,15 +674,12 @@ impl<R: Read + io::Seek> ZipArchive<R> {
             data.aes_mode,
             #[cfg(feature = "aes-crypto")]
             data.compressed_size,
-        ) {
-            Ok(Ok(crypto_reader)) => Ok(Ok(ZipFile {
-                crypto_reader: Some(crypto_reader),
-                reader: ZipFileReader::NoReader,
-                data: Cow::Borrowed(data),
-            })),
-            Err(e) => Err(e),
-            Ok(Err(e)) => Ok(Err(e)),
-        }
+        )?;
+        Ok(ZipFile {
+            crypto_reader: Some(crypto_reader),
+            reader: ZipFileReader::NoReader,
+            data: Cow::Borrowed(data),
+        })
     }
 
     /// Unwrap and return the inner reader object
@@ -1183,8 +1171,7 @@ pub fn read_zipfile_from_stream<'a, R: io::Read>(
         None,
         #[cfg(feature = "aes-crypto")]
         result.compressed_size,
-    )?
-    .unwrap();
+    )?;
 
     Ok(Some(ZipFile {
         data: Cow::Owned(result),

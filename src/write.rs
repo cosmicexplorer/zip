@@ -478,10 +478,10 @@ impl<W: Write + io::Seek> ZipWriter<W> {
 
         let writer = self.inner.get_plain();
         /* Get the file entries from the source archive. */
-        let mut new_files = source.merge_contents(writer)?;
+        let new_files = source.merge_contents(writer)?;
         /* These file entries are now ours! */
-        self.files.append(&mut new_files);
-        assert!(new_files.is_empty());
+        self.files
+            .extend(new_files.into_iter().map(|(_, entry)| entry));
 
         Ok(())
     }

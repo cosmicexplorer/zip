@@ -9,6 +9,10 @@ const CENTRAL_DIRECTORY_END_SIGNATURE: u32 = 0x06054b50;
 pub const ZIP64_CENTRAL_DIRECTORY_END_SIGNATURE: u32 = 0x06064b50;
 const ZIP64_CENTRAL_DIRECTORY_END_LOCATOR_SIGNATURE: u32 = 0x07064b50;
 
+/// The number of bytes necessary to allocate a zip64 record for an individual file.
+///
+/// If a file larger than this threshold attempts to be written, [`ZipWriter`] will raise an
+/// [`io::Error`] with [`io::ErrorKind::Other`].
 pub const ZIP64_BYTES_THR: u64 = u32::MAX as u64;
 pub const ZIP64_ENTRY_THR: usize = u16::MAX as usize;
 

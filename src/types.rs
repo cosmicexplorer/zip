@@ -1,6 +1,7 @@
 //! Types that specify what is contained in a ZIP.
 use cfg_if::cfg_if;
 use num_enum::{FromPrimitive, IntoPrimitive};
+use std::convert::TryInto;
 use std::path;
 
 #[cfg(doc)]
@@ -253,8 +254,8 @@ impl TryFrom<OffsetDateTime> for DateTime {
     fn try_from(dt: OffsetDateTime) -> Result<Self, Self::Error> {
         if dt.year() >= 1980 && dt.year() <= 2107 {
             Ok(DateTime {
-                year: (dt.year()) as u16,
-                month: (dt.month()) as u8,
+                year: dt.year().try_into().map_err(|_| DateTimeRangeError)?,
+                month: dt.month().try_into().map_err(|_| DateTimeRangeError)?,
                 day: dt.day(),
                 hour: dt.hour(),
                 minute: dt.minute(),

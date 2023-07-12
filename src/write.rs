@@ -470,6 +470,7 @@ impl<W: Write + io::Seek> ZipWriter<W> {
     /// This method parses the central directory records at the end of the stream in order to
     /// extract file metadata, then simply performs a single big [`io::copy()`](io::copy) to
     /// transfer all the actual file contents without any decompression or decryption.
+    #[cfg(feature = "merge")]
     pub fn merge_archive<R>(&mut self, mut source: ZipArchive<R>) -> ZipResult<()>
     where
         R: Read + io::Seek,

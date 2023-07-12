@@ -42,6 +42,9 @@ pub(crate) mod zip_archive {
     pub(crate) struct Shared {
         pub(super) files: super::IndexMap<String, super::ZipFileData>,
         pub(super) offset: u64,
+        /* We put this in an Arc, and a single u64 is much less data than the `files` vector, but
+         * it means most users don't have to accept this less-tested code path at all. */
+        #[cfg(feature = "merge")]
         pub(super) cde_start: u64,
         pub(super) comment: Vec<u8>,
     }
@@ -299,6 +302,7 @@ fn make_reader(
 }
 
 impl<R: Read + io::Seek> ZipArchive<R> {
+    #[cfg(feature = "merge")]
     pub(crate) fn merge_contents<W: Write + io::Seek>(
         &mut self,
         mut w: W,
@@ -503,6 +507,7 @@ impl<R: Read + io::Seek> ZipArchive<R> {
         let shared = Arc::new(zip_archive::Shared {
             files,
             offset: archive_offset,
+            #[cfg(feature = "merge")]
             cde_start: directory_start,
             comment: footer.zip_file_comment,
         });

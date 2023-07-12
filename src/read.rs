@@ -10,7 +10,9 @@ use crate::spec;
 use crate::types::{AesMode, AesVendorVersion, AtomicU64, DateTime, System, ZipFileData};
 use crate::zipcrypto::{ZipCryptoReader, ZipCryptoReaderValid, ZipCryptoValidator};
 use byteorder::{LittleEndian, ReadBytesExt};
+use cfg_if::cfg_if;
 use indexmap::IndexMap;
+#[cfg(feature = "rayon")]
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::io::{self, prelude::*};
@@ -107,16 +109,19 @@ impl<'a> CryptoReader<'a> {
 
     /// Returns `true` if the data is encrypted using AE2.
     pub fn is_ae2_encrypted(&self) -> bool {
-        #[cfg(feature = "aes-crypto")]
-        return matches!(
-            self,
-            CryptoReader::Aes {
-                vendor_version: AesVendorVersion::Ae2,
-                ..
+        cfg_if! {
+            if #[cfg(feature = "aes-crypto")] {
+                return matches!(
+                    self,
+                    CryptoReader::Aes {
+                        vendor_version: AesVendorVersion::Ae2,
+                        ..
+                    }
+                );
+            } else {
+                false
             }
-        );
-        #[cfg(not(feature = "aes-crypto"))]
-        false
+        }
     }
 }
 
@@ -225,20 +230,21 @@ fn make_crypto_reader<'a>(
     }
 
     let reader = match (password, aes_info) {
-        #[cfg(not(feature = "aes-crypto"))]
-        (Some(_), Some(_)) => {
-            return Err(ZipError::UnsupportedArchive(
-                "AES encrypted files cannot be decrypted without the aes-crypto feature.",
-            ))
-        }
-        #[cfg(feature = "aes-crypto")]
         (Some(password), Some((aes_mode, vendor_version))) => {
-            match AesReader::new(reader, aes_mode, compressed_size).validate(password)? {
-                None => return Err(ZipError::InvalidPassword),
-                Some(r) => CryptoReader::Aes {
-                    reader: r,
-                    vendor_version,
-                },
+            cfg_if! {
+                if #[cfg(feature = "aes-crypto")] {
+                    match AesReader::new(reader, aes_mode, compressed_size).validate(password)? {
+                        None => return Err(ZipError::InvalidPassword),
+                        Some(r) => CryptoReader::Aes {
+                            reader: r,
+                            vendor_version,
+                        },
+                    }
+                } else {
+                    return Err(ZipError::UnsupportedArchive(
+                        "AES encrypted files cannot be decrypted without the aes-crypto feature.",
+                    ))
+                }
             }
         }
         (Some(password), None) => {
@@ -307,8 +313,14 @@ impl<R: Read + io::Seek> ZipArchive<R> {
 
         let new_initial_header_start = w.stream_position()?;
         /* Push back file header starts for all entries in the covered files. */
-        new_files
-            .par_iter_mut()
+        cfg_if! {
+            if #[cfg(feature = "rayon")] {
+                let files_iterator = new_files.par_iter_mut();
+            } else {
+                let files_iterator = new_files.iter_mut();
+            }
+        }
+        files_iterator
             .map(|(_, f)| {
                 /* This is probably the only really important thing to change. */
                 f.header_start = f.header_start.checked_add(new_initial_header_start).ok_or(

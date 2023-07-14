@@ -96,9 +96,15 @@ pub struct DateTime {
 }
 
 impl ::std::default::Default for DateTime {
-    /// Constructs an 'default' datetime of 1980-01-01 00:00:00
     fn default() -> DateTime {
-        DateTime {
+        Self::zero()
+    }
+}
+
+impl DateTime {
+    /// Constructs a 'default' datetime of 1980-01-01 00:00:00
+    pub const fn zero() -> Self {
+        Self {
             year: 1980,
             month: 1,
             day: 1,
@@ -107,9 +113,7 @@ impl ::std::default::Default for DateTime {
             second: 0,
         }
     }
-}
 
-impl DateTime {
     /// Converts an msdos (u16, u16) pair to a DateTime object
     pub fn from_msdos(datepart: u16, timepart: u16) -> DateTime {
         let seconds = (timepart & 0b0000000000011111) << 1;

@@ -301,6 +301,31 @@ fn make_reader(
     }
 }
 
+#[cfg(feature = "merge")]
+impl<R> ZipArchive<R> {
+    pub(crate) fn from_finalized_writer(
+        cde_start: u64,
+        files: Vec<ZipFileData>,
+        comment: Vec<u8>,
+        reader: R,
+    ) -> Self {
+        assert!(!files.is_empty());
+        /* This is where the whole file starts. */
+        let initial_offset = files[0].header_start;
+        let files: IndexMap<String, ZipFileData> = files
+            .into_iter()
+            .map(|d| (d.file_name.clone(), d))
+            .collect();
+        let shared = Arc::new(zip_archive::Shared {
+            files,
+            offset: initial_offset,
+            cde_start,
+            comment,
+        });
+        Self { reader, shared }
+    }
+}
+
 impl<R: Read + io::Seek> ZipArchive<R> {
     #[cfg(feature = "merge")]
     pub(crate) fn merge_contents<W: Write + io::Seek>(

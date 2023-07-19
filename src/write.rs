@@ -323,6 +323,21 @@ impl<A: Read + Write + io::Seek> ZipWriter<A> {
             writing_raw: true, // avoid recomputing the last file's header
         })
     }
+
+    /// Write the zip file into the backing stream, then produce a readable archive of that data.
+    ///
+    /// This method avoids parsing the central directory records at the end of the stream for
+    /// a slight performance improvement over running [`ZipArchive::new()`] on the output of
+    /// [`Self::finish()`].
+    #[cfg(feature = "merge")]
+    pub fn finish_into_readable(&mut self) -> ZipResult<ZipArchive<A>> {
+        let cde_start = self.finalize()?;
+        let inner = mem::replace(&mut self.inner, GenericZipWriter::Closed);
+        let comment = mem::take(&mut self.comment);
+        let files = mem::take(&mut self.files);
+        let archive = ZipArchive::from_finalized_writer(cde_start, files, comment, inner.unwrap());
+        Ok(archive)
+    }
 }
 
 impl<W: Write + io::Seek> ZipWriter<W> {
@@ -467,9 +482,9 @@ impl<W: Write + io::Seek> ZipWriter<W> {
 
     /// Copy over the entire contents of another archive verbatim.
     ///
-    /// This method parses the central directory records at the end of the stream in order to
-    /// extract file metadata, then simply performs a single big [`io::copy()`](io::copy) to
-    /// transfer all the actual file contents without any decompression or decryption.
+    /// This method extracts file metadata from the `source` archive, then simply performs a single
+    /// big [`io::copy()`](io::copy) to transfer all the actual file contents without any
+    /// decompression or decryption.
     #[cfg(feature = "merge")]
     pub fn merge_archive<R>(&mut self, mut source: ZipArchive<R>) -> ZipResult<()>
     where
@@ -818,7 +833,7 @@ impl<W: Write + io::Seek> ZipWriter<W> {
     /// This will return the writer, but one should normally not append any data to the end of the file.
     /// Note that the zipfile will also be finished on drop.
     pub fn finish(&mut self) -> ZipResult<W> {
-        self.finalize()?;
+        let _ = self.finalize()?;
         let inner = mem::replace(&mut self.inner, GenericZipWriter::Closed);
         Ok(inner.unwrap())
     }
@@ -861,10 +876,10 @@ impl<W: Write + io::Seek> ZipWriter<W> {
         Ok(())
     }
 
-    fn finalize(&mut self) -> ZipResult<()> {
+    fn finalize(&mut self) -> ZipResult<u64> {
         self.finish_file()?;
 
-        {
+        let central_start = {
             let writer = self.inner.get_plain();
 
             let central_start = writer.stream_position()?;
@@ -910,9 +925,11 @@ impl<W: Write + io::Seek> ZipWriter<W> {
             };
 
             footer.write(writer)?;
-        }
 
-        Ok(())
+            central_start
+        };
+
+        Ok(central_start)
     }
 }
 

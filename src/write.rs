@@ -330,6 +330,7 @@ impl<A: Read + Write + io::Seek> ZipWriter<A> {
     /// a slight performance improvement over running [`ZipArchive::new()`] on the output of
     /// [`Self::finish()`].
     #[cfg(feature = "merge")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "merge")))]
     pub fn finish_into_readable(&mut self) -> ZipResult<ZipArchive<A>> {
         let cde_start = self.finalize()?;
         let inner = mem::replace(&mut self.inner, GenericZipWriter::Closed);
@@ -486,6 +487,7 @@ impl<W: Write + io::Seek> ZipWriter<W> {
     /// big [`io::copy()`](io::copy) to transfer all the actual file contents without any
     /// decompression or decryption.
     #[cfg(feature = "merge")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "merge")))]
     pub fn merge_archive<R>(&mut self, mut source: ZipArchive<R>) -> ZipResult<()>
     where
         R: Read + io::Seek,

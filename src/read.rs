@@ -337,8 +337,11 @@ impl<R: Read + io::Seek> ZipArchive<R> {
             return Ok(new_files);
         }
         /* The first file header will probably start at the beginning of the file, but zip doesn't
-         * enforce that, and executable zips like PEX files will have a shebang line. */
-        /* assert_eq!(0, new_files[0].header_start); */
+         * enforce that, and executable zips like PEX files will have a shebang line so will
+         * definitely be greater than 0.
+         *
+         * assert_eq!(0, new_files[0].header_start); // Avoid this.
+         */
 
         let new_initial_header_start = w.stream_position()?;
         /* Push back file header starts for all entries in the covered files. */
@@ -357,8 +360,8 @@ impl<R: Read + io::Seek> ZipArchive<R> {
                         "new header start from merge would have been too large",
                     ),
                 )?;
-                /* This is only ever used internally to cache metadata lookups (it's not part of the zip
-                 * spec), and 0 is the sentinel value. */
+                /* This is only ever used internally to cache metadata lookups (it's not part of the
+                 * zip spec), and 0 is the sentinel value. */
                 f.central_header_start = 0;
                 /* This is an atomic variable so it can be updated from another thread in the
                  * implementation (which is good!). */
@@ -376,14 +379,24 @@ impl<R: Read + io::Seek> ZipArchive<R> {
             })
             .collect::<Result<(), ZipError>>()?;
 
-        /* Rewind to the beginning of the file. */
+        /* Rewind to the beginning of the file.
+         *
+         * NB: we *could* decide to start copying from new_files[0].header_start instead, which
+         * would avoid copying over e.g. any pex shebangs or other file contents that start before
+         * the first zip file entry. However, zip files actually shouldn't care about garbage data
+         * in *between* real entries, since the central directory header records the correct start
+         * location of each, and keeping track of that math is more complicated logic that will only
+         * rarely be used, since most zips that get merged together are likely to be produced
+         * specifically for that purpose (and therefore are unlikely to have a shebang or other
+         * preface). Finally, this preserves any data that might actually be useful.
+         */
         self.reader.rewind()?;
         /* Find the end of the file data. */
-        let cde_start_pos = self.shared.cde_start;
+        let length_to_read = self.shared.cde_start;
         /* Produce a Read that reads bytes up until the start of the central directory header.
          * This "as &mut dyn Read" trick is used elsewhere to avoid having to clone the underlying
          * handle, which it really shouldn't need to anyway. */
-        let mut limited_raw = (&mut self.reader as &mut dyn Read).take(cde_start_pos);
+        let mut limited_raw = (&mut self.reader as &mut dyn Read).take(length_to_read);
         /* Copy over file data from source archive directly. */
         io::copy(&mut limited_raw, &mut w)?;
 

@@ -5,7 +5,7 @@ zip-rs
 [![Crates.io version](https://img.shields.io/crates/v/zip.svg)](https://crates.io/crates/zip)
 [![Discord](https://badgen.net/badge/icon/discord?icon=discord&label)](https://discord.gg/rQ7H9cSsF4)
 
-[Documentation](https://docs.rs/zip/0.6.3/zip/)
+[Documentation](https://docs.rs/zip-merge/latest/zip_merge/)
 
 Info
 ----

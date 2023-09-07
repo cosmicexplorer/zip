@@ -40,7 +40,6 @@ pub(crate) mod zip_archive {
         pub(super) files: Vec<super::ZipFileData>,
         pub(super) names_map: super::HashMap<String, usize>,
         pub(super) offset: u64,
-        pub(super) cde_start: u64,
         pub(super) comment: Vec<u8>,
     }
 
@@ -338,6 +337,11 @@ impl<R: Read + io::Seek> ZipArchive<R> {
             })
             .collect::<Result<(), ZipError>>()?;
 
+        /* Find the end of the file data. */
+        let (footer, cde_end_pos) = spec::CentralDirectoryEnd::find_and_parse(&mut self.reader)?;
+        let (_, length_to_read, _) =
+            Self::get_directory_counts(&mut self.reader, &footer, cde_end_pos)?;
+        /* let length_to_read = self.shared.cde_start; */
         /* Rewind to the beginning of the file.
          *
          * NB: we *could* decide to start copying from new_files[0].header_start instead, which
@@ -350,8 +354,6 @@ impl<R: Read + io::Seek> ZipArchive<R> {
          * preface). Finally, this preserves any data that might actually be useful.
          */
         self.reader.rewind()?;
-        /* Find the end of the file data. */
-        let length_to_read = self.shared.cde_start;
         /* Produce a Read that reads bytes up until the start of the central directory header.
          * This "as &mut dyn Read" trick is used elsewhere to avoid having to clone the underlying
          * handle, which it really shouldn't need to anyway. */
@@ -506,7 +508,6 @@ impl<R: Read + io::Seek> ZipArchive<R> {
             files,
             names_map,
             offset: archive_offset,
-            cde_start: directory_start,
             comment: footer.zip_file_comment,
         });
 

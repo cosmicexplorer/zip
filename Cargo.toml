@@ -54,6 +54,10 @@ harness = false
 name = "read_metadata"
 harness = false
 
+[[bench]]
+name = "merge_archive"
+harness = false
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]

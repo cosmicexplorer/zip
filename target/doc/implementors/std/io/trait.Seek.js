@@ -1,0 +1,3 @@
+(function() {var implementors = {
+"zip":[["impl&lt;S: <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/std/io/trait.Seek.html\" title=\"trait std::io::Seek\">Seek</a>&gt; <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/std/io/trait.Seek.html\" title=\"trait std::io::Seek\">Seek</a> for <a class=\"struct\" href=\"zip/tokio/combinators/stream_adaptors/struct.Limiter.html\" title=\"struct zip::tokio::combinators::stream_adaptors::Limiter\">Limiter</a>&lt;S&gt;"]]
+};if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()

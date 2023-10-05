@@ -1,0 +1,58 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="As 2 separate read calls:"><title>zip::tokio::stream_impls::deflate - Rust</title><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../../static.files/SourceSerif4-Regular-46f98efaafac5295.ttf.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../../static.files/FiraSans-Regular-018c141bf0843ffd.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../../static.files/FiraSans-Medium-8f9a781e4970d388.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../../static.files/SourceCodePro-Regular-562dcc5011b6de7d.ttf.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../../static.files/SourceSerif4-Bold-a2c9cd1067f8b328.ttf.woff2"><link rel="preload" as="font" type="font/woff2" crossorigin href="../../../../static.files/SourceCodePro-Semibold-d899c5a5c4aeb14a.ttf.woff2"><link rel="stylesheet" href="../../../../static.files/normalize-76eba96aa4d2e634.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-9bb858ba049f1f21.css" id="mainThemeStyle"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="zip" data-themes="" data-resource-suffix="" data-rustdoc-version="1.72.0-nightly (83964c156 2023-07-08)" data-channel="nightly" data-search-js="search-f6292fe389d70017.js" data-settings-js="settings-de11bff964e9d4e5.js" data-settings-css="settings-8c76f75bfb6bd192.css" data-theme-light-css="light-0f8c037637f9eb3e.css" data-theme-dark-css="dark-1097f8e92a01e3cf.css" data-theme-ayu-css="ayu-614652228113ac93.css" ><script src="../../../../static.files/storage-59fd9b8ccb335783.js"></script><script defer src="../../../../static.files/main-0795b7d26be81095.js"></script><noscript><link rel="stylesheet" media="(prefers-color-scheme:light)" href="../../../../static.files/light-0f8c037637f9eb3e.css"><link rel="stylesheet" media="(prefers-color-scheme:dark)" href="../../../../static.files/dark-1097f8e92a01e3cf.css"><link rel="stylesheet" href="../../../../static.files/noscript-13285aec31fa243e.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-16x16-8b506e7a72182f1c.png"><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-422f7d1d52889060.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-2c020d218678b618.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="mobile-topbar"><button class="sidebar-menu-toggle">&#9776;</button><a class="logo-container" href="../../../../zip/index.html"><img class="rust-logo" src="../../../../static.files/rust-logo-151179464ae7ed46.svg" alt="logo"></a><h2></h2></nav><nav class="sidebar"><a class="logo-container" href="../../../../zip/index.html"><img class="rust-logo" src="../../../../static.files/rust-logo-151179464ae7ed46.svg" alt="logo"></a><h2 class="location"><a href="#">Module deflate</a></h2><div class="sidebar-elems"><section><ul class="block"><li><a href="#structs">Structs</a></li><li><a href="#traits">Traits</a></li></ul></section></div></nav><main><div class="width-limiter"><nav class="sub"><form class="search-form"><span></span><input class="search-input" name="search" aria-label="Run search in the documentation" autocomplete="off" spellcheck="false" placeholder="Click or press ‘S’ to search, ‘?’ for more options…" type="search"><div id="help-button" title="help" tabindex="-1"><a href="../../../../help.html">?</a></div><div id="settings-menu" tabindex="-1"><a href="../../../../settings.html" title="settings"><img width="22" height="22" alt="Change settings" src="../../../../static.files/wheel-7b819b6101059cd0.svg"></a></div></form></nav><section id="main-content" class="content"><div class="main-heading"><h1>Module <a href="../../../index.html">zip</a>::<wbr><a href="../../index.html">tokio</a>::<wbr><a href="../index.html">stream_impls</a>::<wbr><a class="mod" href="#">deflate</a><button id="copy-path" title="Copy item path to clipboard"><img src="../../../../static.files/clipboard-7571035ce49a181d.svg" width="19" height="18" alt="Copy item path"></button></h1><span class="out-of-band"><a class="srclink" href="../../../../src/zip/tokio/stream_impls.rs.html#72">source</a> · <button id="toggle-all-docs" title="collapse all docs">[<span>&#x2212;</span>]</button></span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>As 2 separate read calls:</p>
+
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code> <span class="kw">use </span>zip::tokio::{WrappedPin, buf_reader::BufReader, buf_writer::BufWriter, stream_impls::deflate::<span class="kw-2">*</span>};
+ <span class="kw">use </span>flate2::{Decompress, Compress, Compression};
+ <span class="kw">use </span>tokio::io::{<span class="self">self</span>, AsyncReadExt, AsyncWriteExt};
+ <span class="kw">use </span>std::{io::Cursor, pin::Pin, num::NonZeroUsize};
+
+ <span class="kw">let </span>msg = <span class="string">&quot;hello&quot;</span>;
+ <span class="kw">let </span>c = Compression::default();
+ <span class="kw">let </span>buf_reader = BufReader::new(Box::pin(Cursor::new(msg.as_bytes())));
+ <span class="kw">let </span><span class="kw-2">mut </span>def = Reader::with_state(Compress::new(c, <span class="bool-val">false</span>), Box::pin(buf_reader));
+
+ <span class="kw">let </span><span class="kw-2">mut </span>buf = Vec::new();
+ {
+   <span class="kw">use </span>tokio::io::{AsyncReadExt, AsyncSeekExt};
+   def.read_to_end(<span class="kw-2">&amp;mut </span>buf).<span class="kw">await</span><span class="question-mark">?</span>;
+   <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>buf, <span class="kw-2">&amp;</span>[<span class="number">203</span>, <span class="number">72</span>, <span class="number">205</span>, <span class="number">201</span>, <span class="number">201</span>, <span class="number">7</span>, <span class="number">0</span>]);
+ }
+
+ <span class="kw">let </span>buf_writer = BufWriter::new(Box::pin(Cursor::new(Vec::new())));
+ <span class="kw">let </span><span class="kw-2">mut </span>out_inf = Writer::with_state(
+   Decompress::new(<span class="bool-val">false</span>),
+   Box::pin(buf_writer),
+ );
+ {
+   <span class="kw">use </span>tokio::io::{AsyncReadExt, AsyncSeekExt};
+   out_inf.write_all(<span class="kw-2">&amp;</span>buf).<span class="kw">await</span><span class="question-mark">?</span>;
+   out_inf.flush().<span class="kw">await</span><span class="question-mark">?</span>;
+   out_inf.shutdown().<span class="kw">await</span><span class="question-mark">?</span>;
+   <span class="kw">let </span>buf: Vec&lt;u8&gt; = Pin::into_inner(Pin::into_inner(out_inf.unwrap_inner_pin()).unwrap_inner_pin()).into_inner();
+   <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>buf[..], <span class="string">b&quot;hello&quot;</span>);
+ }</code></pre></div>
+<p>Or, within a single <code>tokio::io::copy{,_buf}()</code>:</p>
+
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code> <span class="kw">use </span>zip::tokio::{WrappedPin, buf_reader::BufReader, buf_writer::BufWriter, stream_impls::deflate::<span class="kw-2">*</span>};
+ <span class="kw">use </span>flate2::{Decompress, Compress, Compression};
+ <span class="kw">use </span>tokio::io::{<span class="self">self</span>, AsyncReadExt, AsyncWriteExt};
+ <span class="kw">use </span>std::{io::Cursor, pin::Pin, num::NonZeroUsize};
+
+ <span class="kw">let </span>msg = <span class="string">&quot;hello&quot;</span>;
+ <span class="kw">let </span>c = Compression::default();
+ <span class="kw">let </span>buf_reader = BufReader::new(Box::pin(Cursor::new(msg.as_bytes())));
+ <span class="kw">let </span><span class="kw-2">mut </span>def = Reader::with_state(Compress::new(c, <span class="bool-val">false</span>), Box::pin(buf_reader));
+
+ <span class="kw">let </span>buf_writer = BufWriter::new(Box::pin(Cursor::new(Vec::new())));
+ <span class="kw">let </span><span class="kw-2">mut </span>out_inf = Writer::with_state(
+   Decompress::new(<span class="bool-val">false</span>),
+   Box::pin(buf_writer),
+ );
+
+ io::copy(<span class="kw-2">&amp;mut </span>def, <span class="kw-2">&amp;mut </span>out_inf).<span class="kw">await</span><span class="question-mark">?</span>;
+ out_inf.flush().<span class="kw">await</span><span class="question-mark">?</span>;
+ out_inf.shutdown().<span class="kw">await</span><span class="question-mark">?</span>;
+
+ <span class="kw">let </span>final_buf: Vec&lt;u8&gt; = Pin::into_inner(Pin::into_inner(out_inf.unwrap_inner_pin()).unwrap_inner_pin()).into_inner();
+ <span class="kw">let </span>s = std::str::from_utf8(<span class="kw-2">&amp;</span>final_buf[..]).unwrap();
+ <span class="macro">assert_eq!</span>(<span class="kw-2">&amp;</span>s, <span class="kw-2">&amp;</span>msg);</code></pre></div>
+</div></details><h2 id="structs" class="small-section-header"><a href="#structs">Structs</a></h2><ul class="item-table"><li><div class="item-name"><a class="struct" href="struct.Reader.html" title="struct zip::tokio::stream_impls::deflate::Reader">Reader</a></div><div class="desc docblock-short">Compress:</div></li><li><div class="item-name"><a class="struct" href="struct.Writer.html" title="struct zip::tokio::stream_impls::deflate::Writer">Writer</a></div><div class="desc docblock-short">Compress:</div></li></ul><h2 id="traits" class="small-section-header"><a href="#traits">Traits</a></h2><ul class="item-table"><li><div class="item-name"><a class="trait" href="trait.Flush.html" title="trait zip::tokio::stream_impls::deflate::Flush">Flush</a></div></li><li><div class="item-name"><a class="trait" href="trait.Ops.html" title="trait zip::tokio::stream_impls::deflate::Ops">Ops</a></div></li></ul></section></div></main></body></html>

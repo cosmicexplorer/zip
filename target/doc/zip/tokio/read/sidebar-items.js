@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ZipFileWrappedReader"],"fn":["find_content"],"struct":["DeflateReader","Shared","StoredReader","ZipArchive","ZipFile"],"trait":["ReaderWrapper","SharedData"]};

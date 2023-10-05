@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["slices"],"struct":["BufWriter"],"trait":["AsyncBufWrite"]};

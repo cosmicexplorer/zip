@@ -6,7 +6,6 @@ use thiserror::Error;
 use std::collections::BTreeMap;
 use std::io;
 
-use crate::read::ZipArchive;
 use crate::spec::is_dir;
 
 /// Errors encountered during pipelined extraction.
@@ -16,6 +15,8 @@ pub enum PipelinedExtractionError {
     Io(#[from] io::Error),
     /// entry path format error: {0}
     PathFormat(String),
+    /// file and directory paths overlapped: {0}
+    FileDirOverlap(String),
 }
 
 fn split_by_separator<'a>(
@@ -77,24 +78,58 @@ fn normalize_parent_dirs<'a>(
     Ok((ret, is_dir))
 }
 
-enum FSEntry<'a> {
-    Dir {
-        name: &'a str,
-        contents: BTreeMap<&'a str, Box<FSEntry<'a>>>,
-    },
-    File(&'a str),
+fn split_dir_file_components<'a, 's>(
+    all_components: &'s [&'a str],
+    is_dir: bool,
+) -> (&'s [&'a str], Option<&'a str>) {
+    if is_dir {
+        (all_components, None)
+    } else {
+        let (last, rest) = all_components.split_last().unwrap();
+        (rest, Some(last))
+    }
 }
 
-fn lexicographic_entry_trie<'a, R>(
-    archive: &'a ZipArchive<R>,
+enum FSEntry<'a> {
+    Dir(BTreeMap<&'a str, Box<FSEntry<'a>>>),
+    File,
+}
+
+fn lexicographic_entry_trie<'a>(
+    all_paths: impl Iterator<Item = &'a str>,
 ) -> Result<BTreeMap<&'a str, Box<FSEntry<'a>>>, PipelinedExtractionError> {
     let mut base_dir: BTreeMap<&'a str, Box<FSEntry<'a>>> = BTreeMap::new();
 
-    for entry_path in archive.shared.files.keys() {
-        let cur_dir = &mut base_dir;
+    for entry_path in all_paths {
+        let mut cur_dir = &mut base_dir;
 
-        let (components, is_dir) = normalize_parent_dirs(entry_path)?;
-        todo!();
+        let (all_components, is_dir) = normalize_parent_dirs(entry_path)?;
+        let (dir_components, file_component) = split_dir_file_components(&all_components, is_dir);
+        for component in dir_components.iter() {
+            let next_subdir = cur_dir
+                .entry(component)
+                .or_insert_with(|| Box::new(FSEntry::Dir(BTreeMap::new())));
+            cur_dir = match next_subdir.as_mut() {
+                &mut FSEntry::File => {
+                    return Err(PipelinedExtractionError::FileDirOverlap(format!(
+                        "a file was already registered at the same path as the dir entry {:?}",
+                        entry_path
+                    )));
+                }
+                &mut FSEntry::Dir(ref mut contents) => contents,
+            }
+        }
+        if let Some(filename) = file_component {
+            /* We can't handle duplicate file paths, as that might mess up our parallelization
+             * strategy. */
+            if let Some(prev_entry) = cur_dir.get(filename) {
+                return Err(PipelinedExtractionError::FileDirOverlap(format!(
+                    "another file or directory was already registered at the same path as the file entry {:?}",
+                    entry_path
+                )));
+            }
+            cur_dir.insert(filename, Box::new(FSEntry::File));
+        }
     }
 
     Ok(base_dir)
@@ -119,4 +154,19 @@ mod test {
         assert!(normalize_parent_dirs("a/../../b").is_err());
         assert!(normalize_parent_dirs("./").is_err());
     }
+
+    #[test]
+    fn split_dir_file() {
+        assert_eq!(
+            split_dir_file_components(&["a", "b", "c"], true),
+            (["a", "b", "c"].as_ref(), None)
+        );
+        assert_eq!(
+            split_dir_file_components(&["a", "b", "c"], false),
+            (["a", "b"].as_ref(), Some("c"))
+        );
+    }
+
+    #[test]
+    fn lex_trie() {}
 }

@@ -48,6 +48,8 @@ pub(crate) mod stream;
 #[cfg(feature = "lzma")]
 pub(crate) mod lzma;
 
+mod pipelining;
+
 // Put the struct declaration in a private module to convince rustdoc to display ZipArchive nicely
 pub(crate) mod zip_archive {
     use indexmap::IndexMap;

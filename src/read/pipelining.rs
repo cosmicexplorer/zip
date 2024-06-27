@@ -90,13 +90,14 @@ fn split_dir_file_components<'a, 's>(
     }
 }
 
+#[derive(PartialEq, Eq, Debug)]
 enum FSEntry<'a> {
     Dir(BTreeMap<&'a str, Box<FSEntry<'a>>>),
     File,
 }
 
 fn lexicographic_entry_trie<'a>(
-    all_paths: impl Iterator<Item = &'a str>,
+    all_paths: impl IntoIterator<Item = &'a str>,
 ) -> Result<BTreeMap<&'a str, Box<FSEntry<'a>>>, PipelinedExtractionError> {
     let mut base_dir: BTreeMap<&'a str, Box<FSEntry<'a>>> = BTreeMap::new();
 
@@ -168,5 +169,28 @@ mod test {
     }
 
     #[test]
-    fn lex_trie() {}
+    fn lex_trie() {
+        assert_eq!(
+            lexicographic_entry_trie(["a/b/", "a/", "a/b/c", "d/", "e"]).unwrap(),
+            [
+                (
+                    "a",
+                    FSEntry::Dir(
+                        [(
+                            "b",
+                            FSEntry::Dir([("c", FSEntry::File.into())].into_iter().collect())
+                                .into()
+                        )]
+                        .into_iter()
+                        .collect()
+                    )
+                    .into()
+                ),
+                ("d", FSEntry::Dir(BTreeMap::new()).into()),
+                ("e", FSEntry::File.into())
+            ]
+            .into_iter()
+            .collect()
+        );
+    }
 }

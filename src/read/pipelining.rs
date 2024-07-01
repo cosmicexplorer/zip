@@ -276,7 +276,7 @@ mod handle_creation {
     use thiserror::Error;
 
     use std::cmp;
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::fs;
     use std::hash;
     use std::io;
@@ -327,12 +327,50 @@ mod handle_creation {
         lex_entry_trie: BTreeMap<&'a str, Box<FSEntry<'a, &'a ZipFileData>>>,
         top_level_extraction_dir: &Path,
     ) -> Result<HashMap<ZipDataHandle<'a>, fs::File>, HandleCreationError> {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+
         /* NB: we create subdirs by constructing path strings, which may fail at overlarge
          * paths. This may be fixable on unix with mkdirat()/openat(), but would require more
          * complex platform-specific programming. However, the result would likely decrease the
          * number of syscalls, which may also improve performance. It may also be slightly easier to
          * follow the logic if we can refer to directory inodes instead of constructing path strings
          * as a proxy. This should be considered if requested by users. */
-        todo!()
+        fs::create_dir_all(top_level_extraction_dir)?;
+
+        /* Directories must be writable until all normal files are extracted. We will reset the
+         * perms to their original value after extraction. */
+        /* FIXME: reuse logic from ZipArchive::make_writable_dir_all()! */
+        let original_top_level_perms = fs::metadata(top_level_extraction_dir)?.permissions();
+        #[cfg(unix)]
+        fs::set_permissions(
+            top_level_extraction_dir,
+            fs::Permissions::from_mode(0o700 | original_top_level_perms.mode()),
+        )?;
+        #[cfg(windows)]
+        {
+            let mut writable_perms = original_top_level_perms.clone();
+            writable_perms.set_readonly(false);
+            fs::set_permissions(top_level_extraction_dir, writable_perms)?;
+        }
+
+        let mut file_handle_mapping: HashMap<ZipDataHandle<'a>, fs::File> = HashMap::new();
+        /* FIXME: parallelize this using a channel! */
+        let mut entry_queue: VecDeque<(PathBuf, Box<FSEntry<'a, &'a ZipFileData>>)> =
+            lex_entry_trie
+                .into_iter()
+                .map(|(entry_name, entry_data)| {
+                    (top_level_extraction_dir.join(entry_name), entry_data)
+                })
+                .collect();
+
+        while let Some(entry) = entry_queue.pop_front() {
+            todo!();
+        }
+
+        /* Reset extraction dir perms to their original value before this method was called. */
+        fs::set_permissions(top_level_extraction_dir, original_top_level_perms)?;
+
+        Ok(file_handle_mapping)
     }
 }

@@ -94,8 +94,8 @@ mod path_splitting {
 
     #[derive(PartialEq, Eq, Debug)]
     pub(crate) struct DirEntry<'a, Data> {
-        properties: Option<Data>,
-        children: BTreeMap<&'a str, Box<FSEntry<'a, Data>>>,
+        pub properties: Option<Data>,
+        pub children: BTreeMap<&'a str, Box<FSEntry<'a, Data>>>,
     }
 
     impl<'a, Data> Default for DirEntry<'a, Data> {
@@ -328,7 +328,7 @@ mod handle_creation {
         top_level_extraction_dir: &Path,
     ) -> Result<HashMap<ZipDataHandle<'a>, fs::File>, HandleCreationError> {
         #[cfg(unix)]
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
         /* NB: we create subdirs by constructing path strings, which may fail at overlarge
          * paths. This may be fixable on unix with mkdirat()/openat(), but would require more
@@ -363,13 +363,40 @@ mod handle_creation {
                     (top_level_extraction_dir.join(entry_name), entry_data)
                 })
                 .collect();
+        /* Reset extraction dir perms to their original value before this method was called, and
+         * set non-writable and other perms as specified by directory entries. */
+        let mut dir_perms_todo: Vec<(PathBuf, fs::Permissions)> = vec![(
+            top_level_extraction_dir.to_path_buf(),
+            original_top_level_perms,
+        )];
 
-        while let Some(entry) = entry_queue.pop_front() {
-            todo!();
+        while let Some((path, entry)) = entry_queue.pop_front() {
+            match *entry {
+                FSEntry::File(data) => {
+                    /* FIXME: handle symlinks! */
+                    let mut opts = fs::OpenOptions::new();
+                    opts.write(true).create(true).truncate(true);
+                    /* FIXME: handle readonly bit on windows! */
+                    #[cfg(unix)]
+                    if let Some(mode) = data.unix_mode() {
+                        opts.mode(mode);
+                    }
+                    let key = ZipDataHandle::wrap(data);
+                    let handle = opts.open(path)?;
+                    assert!(file_handle_mapping.insert(key, handle).is_none());
+                }
+                FSEntry::Dir(DirEntry {
+                    properties,
+                    children,
+                }) => {
+                    todo!();
+                }
+            }
         }
 
-        /* Reset extraction dir perms to their original value before this method was called. */
-        fs::set_permissions(top_level_extraction_dir, original_top_level_perms)?;
+        for (dir_path, perms) in dir_perms_todo.into_iter() {
+            fs::set_permissions(dir_path, perms)?;
+        }
 
         Ok(file_handle_mapping)
     }

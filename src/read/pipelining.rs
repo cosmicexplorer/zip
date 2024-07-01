@@ -93,17 +93,34 @@ mod path_splitting {
     }
 
     #[derive(PartialEq, Eq, Debug)]
-    pub(crate) enum FSEntry<'a> {
-        Dir(BTreeMap<&'a str, Box<FSEntry<'a>>>),
-        File,
+    pub(crate) struct DirEntry<'a, Data> {
+        properties: Option<Data>,
+        children: BTreeMap<&'a str, Box<FSEntry<'a, Data>>>,
     }
 
-    pub(crate) fn lexicographic_entry_trie<'a>(
-        all_paths: impl IntoIterator<Item = &'a str>,
-    ) -> Result<BTreeMap<&'a str, Box<FSEntry<'a>>>, PathSplitError> {
-        let mut base_dir: BTreeMap<&'a str, Box<FSEntry<'a>>> = BTreeMap::new();
+    impl<'a, Data> Default for DirEntry<'a, Data> {
+        fn default() -> Self {
+            Self {
+                properties: None,
+                children: BTreeMap::new(),
+            }
+        }
+    }
 
-        for entry_path in all_paths {
+    #[derive(PartialEq, Eq, Debug)]
+    pub(crate) enum FSEntry<'a, Data> {
+        Dir(DirEntry<'a, Data>),
+        File(Data),
+    }
+
+    /* This returns a BTreeMap and not a DirEntry because we do not allow setting permissions or
+     * any other data for the top-level extraction directory. */
+    pub(crate) fn lexicographic_entry_trie<'a, Data>(
+        all_paths: impl IntoIterator<Item = (&'a str, Data)>,
+    ) -> Result<BTreeMap<&'a str, Box<FSEntry<'a, Data>>>, PathSplitError> {
+        let mut base_dir: DirEntry<'a, Data> = DirEntry::default();
+
+        for (entry_path, data) in all_paths {
             let mut cur_dir = &mut base_dir;
 
             let (all_components, is_dir) = normalize_parent_dirs(entry_path)?;
@@ -111,32 +128,53 @@ mod path_splitting {
                 split_dir_file_components(&all_components, is_dir);
             for component in dir_components.iter() {
                 let next_subdir = cur_dir
+                    .children
                     .entry(component)
-                    .or_insert_with(|| Box::new(FSEntry::Dir(BTreeMap::new())));
+                    .or_insert_with(|| Box::new(FSEntry::Dir(DirEntry::default())));
                 cur_dir = match next_subdir.as_mut() {
-                    &mut FSEntry::File => {
+                    &mut FSEntry::File(_) => {
                         return Err(PathSplitError::FileDirOverlap(format!(
                             "a file was already registered at the same path as the dir entry {:?}",
                             entry_path
                         )));
                     }
-                    &mut FSEntry::Dir(ref mut contents) => contents,
+                    &mut FSEntry::Dir(ref mut subdir) => subdir,
                 }
             }
-            if let Some(filename) = file_component {
-                /* We can't handle duplicate file paths, as that might mess up our parallelization
-                 * strategy. */
-                if let Some(prev_entry) = cur_dir.get(filename) {
-                    return Err(PathSplitError::FileDirOverlap(format!(
-                    "another file or directory was already registered at the same path as the file entry {:?}",
-                    entry_path
-                )));
+            match file_component {
+                Some(filename) => {
+                    /* We can't handle duplicate file paths, as that might mess up our
+                     * parallelization strategy. */
+                    if let Some(prev_entry) = cur_dir.children.get(filename) {
+                        return Err(PathSplitError::FileDirOverlap(format!(
+                            "another file or directory was already registered at the same path as the file entry {:?}",
+                            entry_path
+                        )));
+                    }
+                    cur_dir
+                        .children
+                        .insert(filename, Box::new(FSEntry::File(data)));
                 }
-                cur_dir.insert(filename, Box::new(FSEntry::File));
+                None => {
+                    /* We can't handle duplicate directory entries for the exact same normalized
+                     * path, as it's not clear how to merge the possibility of two separate file
+                     * permissions. */
+                    if let Some(_) = cur_dir.properties.replace(data) {
+                        return Err(PathSplitError::FileDirOverlap(format!(
+                            "another directory was already registered at the path {:?}",
+                            entry_path
+                        )));
+                    }
+                }
             }
         }
 
-        Ok(base_dir)
+        let DirEntry {
+            properties,
+            children,
+        } = base_dir;
+        assert!(properties.is_none(), "setting metadata on the top-level extraction dir is not allowed and should have been filtered out");
+        Ok(children)
     }
 
     /* TODO: use proptest for all of this! */
@@ -175,23 +213,56 @@ mod path_splitting {
         #[test]
         fn lex_trie() {
             assert_eq!(
-                lexicographic_entry_trie(["a/b/", "a/", "a/b/c", "d/", "e"]).unwrap(),
+                lexicographic_entry_trie([
+                    ("a/b/", 1),
+                    ("a/", 2),
+                    ("a/b/c", 3),
+                    ("d/", 4),
+                    ("e", 5),
+                    ("a/b/f/g", 6),
+                ])
+                .unwrap(),
                 [
                     (
                         "a",
-                        FSEntry::Dir(
-                            [(
+                        FSEntry::Dir(DirEntry {
+                            properties: Some(2),
+                            children: [(
                                 "b",
-                                FSEntry::Dir([("c", FSEntry::File.into())].into_iter().collect())
-                                    .into()
+                                FSEntry::Dir(DirEntry {
+                                    properties: Some(1),
+                                    children: [
+                                        ("c", FSEntry::File(3).into()),
+                                        (
+                                            "f",
+                                            FSEntry::Dir(DirEntry {
+                                                properties: None,
+                                                children: [("g", FSEntry::File(6).into())]
+                                                    .into_iter()
+                                                    .collect(),
+                                            })
+                                            .into()
+                                        ),
+                                    ]
+                                    .into_iter()
+                                    .collect(),
+                                })
+                                .into()
                             )]
                             .into_iter()
-                            .collect()
-                        )
+                            .collect(),
+                        })
                         .into()
                     ),
-                    ("d", FSEntry::Dir(BTreeMap::new()).into()),
-                    ("e", FSEntry::File.into())
+                    (
+                        "d",
+                        FSEntry::Dir(DirEntry {
+                            properties: Some(4),
+                            children: BTreeMap::new(),
+                        })
+                        .into()
+                    ),
+                    ("e", FSEntry::File(5).into())
                 ]
                 .into_iter()
                 .collect()

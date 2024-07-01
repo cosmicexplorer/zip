@@ -8,7 +8,7 @@ mod path_splitting {
 
     use crate::spec::is_dir;
 
-    /// Errors encountered during path splitting
+    /// Errors encountered during path splitting.
     #[derive(Debug, Display, Error)]
     pub enum PathSplitError {
         /// entry path format error: {0}
@@ -268,5 +268,71 @@ mod path_splitting {
                 .collect()
             );
         }
+    }
+}
+
+mod handle_creation {
+    use displaydoc::Display;
+    use thiserror::Error;
+
+    use std::cmp;
+    use std::collections::{BTreeMap, HashMap};
+    use std::fs;
+    use std::hash;
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    use super::path_splitting::{DirEntry, FSEntry};
+
+    use crate::types::ZipFileData;
+
+    /// Errors encountered when creating output handles for extracting entries to.
+    #[derive(Debug, Display, Error)]
+    pub enum HandleCreationError {
+        /// i/o error: {0}
+        Io(#[from] io::Error),
+    }
+
+    pub(crate) struct ZipDataHandle<'a>(&'a ZipFileData);
+
+    impl<'a> ZipDataHandle<'a> {
+        #[inline(always)]
+        const fn ptr(&self) -> *const ZipFileData {
+            self.0
+        }
+
+        #[inline(always)]
+        pub const fn wrap(data: &'a ZipFileData) -> Self {
+            Self(data)
+        }
+    }
+
+    impl<'a> cmp::PartialEq for ZipDataHandle<'a> {
+        #[inline(always)]
+        fn eq(&self, other: &Self) -> bool {
+            self.ptr() == other.ptr()
+        }
+    }
+
+    impl<'a> cmp::Eq for ZipDataHandle<'a> {}
+
+    impl<'a> hash::Hash for ZipDataHandle<'a> {
+        #[inline(always)]
+        fn hash<H: hash::Hasher>(&self, state: &mut H) {
+            self.ptr().hash(state);
+        }
+    }
+
+    pub(crate) fn transform_entries_to_allocated_handles<'a>(
+        lex_entry_trie: BTreeMap<&'a str, Box<FSEntry<'a, &'a ZipFileData>>>,
+        top_level_extraction_dir: &Path,
+    ) -> Result<HashMap<ZipDataHandle<'a>, fs::File>, HandleCreationError> {
+        /* NB: we create subdirs by constructing path strings, which may fail at overlarge
+         * paths. This may be fixable on unix with mkdirat()/openat(), but would require more
+         * complex platform-specific programming. However, the result would likely decrease the
+         * number of syscalls, which may also improve performance. It may also be slightly easier to
+         * follow the logic if we can refer to directory inodes instead of constructing path strings
+         * as a proxy. This should be considered if requested by users. */
+        todo!()
     }
 }

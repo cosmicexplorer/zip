@@ -291,6 +291,8 @@ mod handle_creation {
     pub enum HandleCreationError {
         /// i/o error: {0}
         Io(#[from] io::Error),
+        /// extraction dir {0:?} existed but was not writable
+        ExtractionDirNotWritable(PathBuf),
     }
 
     pub(crate) struct ZipDataHandle<'a>(&'a ZipFileData);
@@ -342,6 +344,11 @@ mod handle_creation {
          * perms to their original value after extraction. */
         /* FIXME: reuse logic from ZipArchive::make_writable_dir_all()! */
         let original_top_level_perms = fs::metadata(top_level_extraction_dir)?.permissions();
+        if original_top_level_perms.readonly() {
+            return Err(HandleCreationError::ExtractionDirNotWritable(
+                top_level_extraction_dir.to_path_buf(),
+            ));
+        }
         #[cfg(unix)]
         fs::set_permissions(
             top_level_extraction_dir,
@@ -356,13 +363,23 @@ mod handle_creation {
 
         let mut file_handle_mapping: HashMap<ZipDataHandle<'a>, fs::File> = HashMap::new();
         /* FIXME: parallelize this using a channel! */
-        let mut entry_queue: VecDeque<(PathBuf, Box<FSEntry<'a, &'a ZipFileData>>)> =
-            lex_entry_trie
-                .into_iter()
-                .map(|(entry_name, entry_data)| {
-                    (top_level_extraction_dir.join(entry_name), entry_data)
-                })
-                .collect();
+        /* NB: the parent dir perms are necessary to propagate because we may temporarily set
+         * writable perms in order to extract, but want to avoid mutating perms for any subdirs
+         * without explicit entries after extraction. */
+        let mut entry_queue: VecDeque<(
+            PathBuf,
+            fs::Permissions,
+            Box<FSEntry<'a, &'a ZipFileData>>,
+        )> = lex_entry_trie
+            .into_iter()
+            .map(|(entry_name, entry_data)| {
+                (
+                    top_level_extraction_dir.join(entry_name),
+                    original_top_level_perms.clone(),
+                    entry_data,
+                )
+            })
+            .collect();
         /* Reset extraction dir perms to their original value before this method was called, and
          * set non-writable and other perms as specified by directory entries. */
         let mut dir_perms_todo: Vec<(PathBuf, fs::Permissions)> = vec![(
@@ -370,7 +387,7 @@ mod handle_creation {
             original_top_level_perms,
         )];
 
-        while let Some((path, entry)) = entry_queue.pop_front() {
+        while let Some((path, parent_dir_perms, entry)) = entry_queue.pop_front() {
             match *entry {
                 FSEntry::File(data) => {
                     /* FIXME: handle symlinks! */
@@ -389,12 +406,49 @@ mod handle_creation {
                     properties,
                     children,
                 }) => {
-                    todo!();
+                    let perms_to_set = match properties.and_then(|data| data.unix_mode()) {
+                        Some(mode) => {
+                            #[cfg(unix)]
+                            let ret_perms = fs::Permissions::from_mode(mode);
+                            #[cfg(windows)]
+                            let ret_perms = todo!("FIXME: propagate readonly bit from windows!");
+                            ret_perms
+                        }
+                        None => match fs::metadata(&path) {
+                            Err(e) if e.kind() == io::ErrorKind::NotFound => parent_dir_perms,
+                            Err(e) => return Err(e.into()),
+                            Ok(metadata) => metadata.permissions(),
+                        },
+                    };
+                    match fs::create_dir(&path) {
+                        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => (),
+                        Err(e) => return Err(e.into()),
+                        Ok(()) => (),
+                    }
+                    #[cfg(unix)]
+                    fs::set_permissions(
+                        &path,
+                        fs::Permissions::from_mode(0o700 | perms_to_set.mode()),
+                    )?;
+                    #[cfg(windows)]
+                    {
+                        let mut writable_perms = perms_to_set.clone();
+                        writable_perms.set_readonly(false);
+                        fs::set_permissions(&path, writable_perms)?;
+                    }
+
+                    /* (1) Write the desired perms to the dir perms queue. */
+                    dir_perms_todo.push((path.clone(), perms_to_set.clone()));
+                    /* (2) Generate sub-entries by constructing full paths. */
+                    for (sub_name, entry) in children.into_iter() {
+                        let full_name = path.join(sub_name);
+                        entry_queue.push_back((full_name, perms_to_set.clone(), entry));
+                    }
                 }
             }
         }
 
-        for (dir_path, perms) in dir_perms_todo.into_iter() {
+        for (dir_path, perms) in dir_perms_todo.into_iter().rev() {
             fs::set_permissions(dir_path, perms)?;
         }
 

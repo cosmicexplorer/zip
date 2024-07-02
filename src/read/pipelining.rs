@@ -330,6 +330,24 @@ mod handle_creation {
         pub symlink_entries: HashSet<ZipDataHandle<'a>>,
     }
 
+    /* TODO: reuse logic from ZipArchive::make_writable_dir_all()! */
+    fn set_writable_dir(dir: &Path, perms: &fs::Permissions) -> io::Result<()> {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+
+        #[cfg(unix)]
+        let writable_perms = fs::Permissions::from_mode(0o700 | perms.mode());
+
+        #[cfg(windows)]
+        let writable_perms = {
+            let mut writable_perms = perms.clone();
+            writable_perms.set_readonly(false);
+            writable_perms
+        };
+
+        fs::set_permissions(dir, writable_perms)
+    }
+
     pub(crate) fn transform_entries_to_allocated_handles<'a>(
         lex_entry_trie: BTreeMap<&'a str, Box<FSEntry<'a, &'a ZipFileData>>>,
         top_level_extraction_dir: &Path,
@@ -347,24 +365,13 @@ mod handle_creation {
 
         /* Directories must be writable until all normal files are extracted. We will reset the
          * perms to their original value after extraction. */
-        /* TODO: reuse logic from ZipArchive::make_writable_dir_all()! */
         let original_top_level_perms = fs::metadata(top_level_extraction_dir)?.permissions();
         if original_top_level_perms.readonly() {
             return Err(HandleCreationError::ExtractionDirNotWritable(
                 top_level_extraction_dir.to_path_buf(),
             ));
         }
-        #[cfg(unix)]
-        fs::set_permissions(
-            top_level_extraction_dir,
-            fs::Permissions::from_mode(0o700 | original_top_level_perms.mode()),
-        )?;
-        #[cfg(windows)]
-        {
-            let mut writable_perms = original_top_level_perms.clone();
-            writable_perms.set_readonly(false);
-            fs::set_permissions(top_level_extraction_dir, writable_perms)?;
-        }
+        set_writable_dir(top_level_extraction_dir, &original_top_level_perms)?;
 
         let mut file_handle_mapping: HashMap<ZipDataHandle<'a>, fs::File> = HashMap::new();
         let mut symlink_entries: HashSet<ZipDataHandle<'a>> = HashSet::new();
@@ -450,17 +457,7 @@ mod handle_creation {
                         Err(e) => return Err(e.into()),
                         Ok(()) => (),
                     }
-                    #[cfg(unix)]
-                    fs::set_permissions(
-                        &path,
-                        fs::Permissions::from_mode(0o700 | perms_to_set.mode()),
-                    )?;
-                    #[cfg(windows)]
-                    {
-                        let mut writable_perms = perms_to_set.clone();
-                        writable_perms.set_readonly(false);
-                        fs::set_permissions(&path, writable_perms)?;
-                    }
+                    set_writable_dir(&path, &perms_to_set)?;
 
                     /* (1) Write the desired perms to the dir perms queue. */
                     dir_perms_todo.push((path.clone(), perms_to_set.clone()));

@@ -11,9 +11,9 @@ mod path_splitting {
     /// Errors encountered during path splitting.
     #[derive(Debug, Display, Error)]
     pub enum PathSplitError {
-        /// entry path format error: {0}
+        /// entry path format error: {0:?}
         PathFormat(String),
-        /// file and directory paths overlapped: {0}
+        /// file and directory paths overlapped: {0:?}
         FileDirOverlap(String),
     }
 
@@ -37,7 +37,7 @@ mod path_splitting {
      * allocations, but that really shouldn't matter for our purposes. I like the idea of using our
      * own logic here, since parallel/pipelined extraction is really a different use case than the
      * rest of the zip crate, but it's definitely worth considering. */
-    fn normalize_parent_dirs<'a>(
+    pub(crate) fn normalize_parent_dirs<'a>(
         entry_path: &'a str,
     ) -> Result<(Vec<&'a str>, bool), PathSplitError> {
         if entry_path.starts_with('/') || entry_path.starts_with('\\') {
@@ -116,11 +116,11 @@ mod path_splitting {
     /* This returns a BTreeMap and not a DirEntry because we do not allow setting permissions or
      * any other data for the top-level extraction directory. */
     pub(crate) fn lexicographic_entry_trie<'a, Data>(
-        all_paths: impl IntoIterator<Item = (&'a str, Data)>,
+        all_entries: impl IntoIterator<Item = (&'a str, Data)>,
     ) -> Result<BTreeMap<&'a str, Box<FSEntry<'a, Data>>>, PathSplitError> {
         let mut base_dir: DirEntry<'a, Data> = DirEntry::default();
 
-        for (entry_path, data) in all_paths {
+        for (entry_path, data) in all_entries {
             let mut cur_dir = &mut base_dir;
 
             let (all_components, is_dir) = normalize_parent_dirs(entry_path)?;
@@ -402,15 +402,15 @@ mod handle_creation {
                     if let Some(mode) = data.unix_mode() {
                         /* TODO: reuse logic from ZipFile::is_symlink()! */
                         if mode & S_IFLNK == S_IFLNK {
-                            /* FIXME: This is actually harder than it sounds, because an archive may
-                             * have an entry with a path that indexes into the symlink path and not
-                             * the symlink's target path. We can probably just disallow this for
-                             * pipelined extraction, but we probably *do* want to support symlinks
-                             * in general. We may want to perform a preprocessing step somehow. */
-                            /* FIXME: add a preprocessing step to error out if any entry *after*
-                             * a symlink entry for a directory refers to the symlink path; this
-                             * will work with normal extraction bc it goes in order, but not with
-                             * parallel extraction. */
+                            /* NB: An archive may have an entry with a path that indexes into the
+                             * symlink path and not the symlink's target path. This will work
+                             * correctly with in-order extraction, but cannot be performed without
+                             * dereferencing the symlink target, which requires seeking into zip
+                             * archive contents.
+                             * super::symlink_preprocessing::validate_symlink_dereferences() may be
+                             * used to verify that no order-dependent symlink dereferences occur,
+                             * which allows us to avoid seeking into the zip archive before we're
+                             * ready. */
                             assert!(symlink_entries.insert(key));
                             continue;
                         }
@@ -481,5 +481,104 @@ mod handle_creation {
             file_handle_mapping,
             symlink_entries,
         })
+    }
+}
+
+mod symlink_preprocessing {
+    use displaydoc::Display;
+    use thiserror::Error;
+
+    use indexmap::IndexMap;
+
+    use crate::spec::is_dir;
+    use crate::types::{ffi::S_IFLNK, ZipFileData};
+
+    use super::path_splitting::{normalize_parent_dirs, PathSplitError};
+
+    /// Errors occurring from symlinks within archives we want to perform a pipelined
+    /// extraction upon.
+    #[derive(Debug, Display, Error)]
+    pub enum SymlinkPreprocessingError {
+        /// entry {0:?} (normalized to {1:?}) dereferences an earlier symlink at path {2:?} (normalized to {3:?}), which is not supported by pipelined extraction
+        OrderDependentInternalSymlinkDereference(String, String, String, String),
+        /// entry {0:?} is a symlink by mode, but a directory entry by name, which is invalid
+        SymlinkDirEntry(String),
+        /// path split error: {0}
+        PathSplit(#[from] PathSplitError),
+        /// duplicate symlink entries {0:?} and {1:?} at the same path {2:?} after normalization
+        DuplicateSymlinkEntry(String, String, String),
+    }
+
+    pub(crate) fn validate_symlink_dereferences<'a>(
+        /* TODO: reuse logic from ZipFile::is_symlink()! */
+        all_entries: impl IntoIterator<Item = (&'a str, bool)>,
+    ) -> Result<(), SymlinkPreprocessingError> {
+        let mut symlink_paths: IndexMap<String, String> = IndexMap::new();
+
+        for (entry_path, is_symlink) in all_entries {
+            /* If this is a symlink entry, normalize it and add it to the set of symlink paths. */
+            if is_symlink {
+                if is_dir(entry_path) {
+                    return Err(SymlinkPreprocessingError::SymlinkDirEntry(
+                        entry_path.to_string(),
+                    ));
+                }
+                let (parts, is_dir) = normalize_parent_dirs(entry_path)?;
+                assert!(!is_dir, "already checked that this was not a dir entry");
+
+                let normalized_symlink_entry_path = format!("{0}/", parts.join("/"),);
+                if let Some(prev_path) = symlink_paths.insert(
+                    normalized_symlink_entry_path.clone(),
+                    entry_path.to_string(),
+                ) {
+                    return Err(SymlinkPreprocessingError::DuplicateSymlinkEntry(
+                        prev_path,
+                        entry_path.to_string(),
+                        normalized_symlink_entry_path,
+                    ));
+                }
+                continue;
+            }
+
+            /* Otherwise, normalize the path and check for prefix against previously registered
+             * symlinks. */
+            let (parts, is_dir) = normalize_parent_dirs(entry_path)?;
+            let normalized_entry_path: String =
+                format!("{0}{1}", parts.join("/"), if is_dir { "/" } else { "" });
+            /* TODO: rayon for checking prefixes? */
+            for (normalized_symlink_entry_path, full_symlink_entry_path) in symlink_paths.iter() {
+                if normalized_entry_path.starts_with(normalized_symlink_entry_path) {
+                    return Err(
+                        SymlinkPreprocessingError::OrderDependentInternalSymlinkDereference(
+                            entry_path.to_string(),
+                            normalized_entry_path,
+                            normalized_symlink_entry_path.to_string(),
+                            full_symlink_entry_path.to_string(),
+                        ),
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /* TODO: use proptest for all of this! */
+    #[cfg(test)]
+    mod test {
+        use super::*;
+
+        #[test]
+        fn symlink_deref_success() {
+            validate_symlink_dereferences([("a", true)]).unwrap();
+            validate_symlink_dereferences([("a/b", true), ("a/c", false)]).unwrap();
+        }
+
+        #[test]
+        fn symlink_deref_fail() {
+            assert!(validate_symlink_dereferences([("a", true), ("a/b", false)]).is_err());
+            assert!(validate_symlink_dereferences([("a", true), ("a", true)]).is_err());
+            assert!(validate_symlink_dereferences([("a/", true)]).is_err());
+        }
     }
 }

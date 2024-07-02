@@ -276,7 +276,7 @@ mod handle_creation {
     use thiserror::Error;
 
     use std::cmp;
-    use std::collections::{BTreeMap, HashMap, VecDeque};
+    use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
     use std::fs;
     use std::hash;
     use std::io;
@@ -284,7 +284,7 @@ mod handle_creation {
 
     use super::path_splitting::{DirEntry, FSEntry};
 
-    use crate::types::ZipFileData;
+    use crate::types::{ffi::S_IFLNK, ZipFileData};
 
     /// Errors encountered when creating output handles for extracting entries to.
     #[derive(Debug, Display, Error)]
@@ -325,10 +325,15 @@ mod handle_creation {
         }
     }
 
+    pub(crate) struct AllocatedHandles<'a> {
+        pub file_handle_mapping: HashMap<ZipDataHandle<'a>, fs::File>,
+        pub symlink_entries: HashSet<ZipDataHandle<'a>>,
+    }
+
     pub(crate) fn transform_entries_to_allocated_handles<'a>(
         lex_entry_trie: BTreeMap<&'a str, Box<FSEntry<'a, &'a ZipFileData>>>,
         top_level_extraction_dir: &Path,
-    ) -> Result<HashMap<ZipDataHandle<'a>, fs::File>, HandleCreationError> {
+    ) -> Result<AllocatedHandles<'a>, HandleCreationError> {
         #[cfg(unix)]
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
@@ -342,7 +347,7 @@ mod handle_creation {
 
         /* Directories must be writable until all normal files are extracted. We will reset the
          * perms to their original value after extraction. */
-        /* FIXME: reuse logic from ZipArchive::make_writable_dir_all()! */
+        /* TODO: reuse logic from ZipArchive::make_writable_dir_all()! */
         let original_top_level_perms = fs::metadata(top_level_extraction_dir)?.permissions();
         if original_top_level_perms.readonly() {
             return Err(HandleCreationError::ExtractionDirNotWritable(
@@ -362,7 +367,8 @@ mod handle_creation {
         }
 
         let mut file_handle_mapping: HashMap<ZipDataHandle<'a>, fs::File> = HashMap::new();
-        /* FIXME: parallelize this using a channel! */
+        let mut symlink_entries: HashSet<ZipDataHandle<'a>> = HashSet::new();
+        /* TODO: parallelize this using a channel! */
         /* NB: the parent dir perms are necessary to propagate because we may temporarily set
          * writable perms in order to extract, but want to avoid mutating perms for any subdirs
          * without explicit entries after extraction. */
@@ -390,15 +396,33 @@ mod handle_creation {
         while let Some((path, parent_dir_perms, entry)) = entry_queue.pop_front() {
             match *entry {
                 FSEntry::File(data) => {
-                    /* FIXME: handle symlinks! */
+                    let key = ZipDataHandle::wrap(data);
                     let mut opts = fs::OpenOptions::new();
-                    opts.write(true).create(true).truncate(true);
-                    /* FIXME: handle readonly bit on windows! */
-                    #[cfg(unix)]
+
                     if let Some(mode) = data.unix_mode() {
+                        /* TODO: reuse logic from ZipFile::is_symlink()! */
+                        if mode & S_IFLNK == S_IFLNK {
+                            /* FIXME: This is actually harder than it sounds, because an archive may
+                             * have an entry with a path that indexes into the symlink path and not
+                             * the symlink's target path. We can probably just disallow this for
+                             * pipelined extraction, but we probably *do* want to support symlinks
+                             * in general. We may want to perform a preprocessing step somehow. */
+                            /* FIXME: add a preprocessing step to error out if any entry *after*
+                             * a symlink entry for a directory refers to the symlink path; this
+                             * will work with normal extraction bc it goes in order, but not with
+                             * parallel extraction. */
+                            assert!(symlink_entries.insert(key));
+                            continue;
+                        }
+
+                        /* TODO: consider handling the readonly bit on windows. We don't currently
+                         * do this in normal extraction, so we don't need to do this yet for
+                         * pipelining. */
+                        #[cfg(unix)]
                         opts.mode(mode);
                     }
-                    let key = ZipDataHandle::wrap(data);
+                    opts.write(true).create(true).truncate(true);
+
                     let handle = opts.open(path)?;
                     assert!(file_handle_mapping.insert(key, handle).is_none());
                 }
@@ -410,8 +434,9 @@ mod handle_creation {
                         Some(mode) => {
                             #[cfg(unix)]
                             let ret_perms = fs::Permissions::from_mode(mode);
+                            /* On windows, just propagate the parent dir perms. */
                             #[cfg(windows)]
-                            let ret_perms = todo!("FIXME: propagate readonly bit from windows!");
+                            let ret_perms = parent_dir_perms;
                             ret_perms
                         }
                         None => match fs::metadata(&path) {
@@ -452,6 +477,9 @@ mod handle_creation {
             fs::set_permissions(dir_path, perms)?;
         }
 
-        Ok(file_handle_mapping)
+        Ok(AllocatedHandles {
+            file_handle_mapping,
+            symlink_entries,
+        })
     }
 }

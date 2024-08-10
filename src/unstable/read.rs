@@ -2,10 +2,8 @@
 
 use crate::compression::CompressionMethod;
 use crate::crc32::non_crypto::Crc32Reader;
-use crate::extra_fields::ExtraField;
-use crate::read::find_data_start;
+use crate::read::{find_data_start, EntryData, HasZipMetadata};
 use crate::result::{ZipError, ZipResult};
-use crate::types::ffi::S_IFLNK;
 use crate::types::{DateTime, ZipFileData};
 use crate::zipcrypto::{ZipCryptoReader, ZipCryptoReaderValid, ZipCryptoValidator};
 
@@ -30,8 +28,6 @@ use flate2::read::DeflateDecoder;
 use zstd::stream::read::Decoder as ZstdDecoder;
 
 use std::io::{self, Read, Seek};
-use std::path::PathBuf;
-use std::slice;
 
 pub(crate) enum EntryReader<R> {
     Stored(R),
@@ -116,160 +112,13 @@ where
     }
 }
 
-mod sealed_data {
-    use super::ZipFileData;
-
-    #[doc(hidden)]
-    pub trait ArchiveData {
-        fn data(&self) -> &ZipFileData;
-    }
-}
-
-pub trait ArchiveEntry: Read + sealed_data::ArchiveData {
-    /// Get the version of the file
-    fn version_made_by(&self) -> (u8, u8) {
-        (
-            self.data().version_made_by / 10,
-            self.data().version_made_by % 10,
-        )
-    }
-
-    /// Get the name of the file
-    ///
-    /// # Warnings
-    ///
-    /// It is dangerous to use this name directly when extracting an archive.
-    /// It may contain an absolute path (`/etc/shadow`), or break out of the
-    /// current directory (`../runtime`). Carelessly writing to these paths
-    /// allows an attacker to craft a ZIP archive that will overwrite critical
-    /// files.
-    ///
-    /// You can use the [`ZipFile::enclosed_name`] method to validate the name
-    /// as a safe path.
-    fn name(&self) -> &str {
-        &self.data().file_name
-    }
-
-    /// Get the name of the file, in the raw (internal) byte representation.
-    ///
-    /// The encoding of this data is currently undefined.
-    fn name_raw(&self) -> &[u8] {
-        &self.data().file_name_raw
-    }
-
-    /// Rewrite the path, ignoring any path components with special meaning.
-    ///
-    /// - Absolute paths are made relative
-    /// - [`ParentDir`]s are ignored
-    /// - Truncates the filename at a NULL byte
-    ///
-    /// This is appropriate if you need to be able to extract *something* from
-    /// any archive, but will easily misrepresent trivial paths like
-    /// `foo/../bar` as `foo/bar` (instead of `bar`). Because of this,
-    /// [`ZipFile::enclosed_name`] is the better option in most scenarios.
-    ///
-    /// [`ParentDir`]: `Component::ParentDir`
-    fn mangled_name(&self) -> PathBuf {
-        self.data().file_name_sanitized()
-    }
-
-    /// Ensure the file path is safe to use as a [`Path`].
-    ///
-    /// - It can't contain NULL bytes
-    /// - It can't resolve to a path outside the current directory
-    ///   > `foo/../bar` is fine, `foo/../../bar` is not.
-    /// - It can't be an absolute path
-    ///
-    /// This will read well-formed ZIP files correctly, and is resistant
-    /// to path-based exploits. It is recommended over
-    /// [`ZipFile::mangled_name`].
-    fn enclosed_name(&self) -> Option<PathBuf> {
-        self.data().enclosed_name()
-    }
-
-    /// Get the comment of the file
-    fn comment(&self) -> &str {
-        &self.data().file_comment
-    }
-
-    /// Get the compression method used to store the file
-    fn compression(&self) -> CompressionMethod {
-        self.data().compression_method
-    }
-
-    /// Get the size of the file, in bytes, in the archive
-    fn compressed_size(&self) -> u64 {
-        self.data().compressed_size
-    }
-
-    /// Get the size of the file, in bytes, when uncompressed
-    fn size(&self) -> u64 {
-        self.data().uncompressed_size
-    }
-
-    /// Get the time the file was last modified
-    fn last_modified(&self) -> Option<DateTime> {
-        self.data().last_modified_time
-    }
-
-    /// Returns whether the file is actually a directory
-    fn is_dir(&self) -> bool {
-        self.data().is_dir()
-    }
-
-    /// Returns whether the file is actually a symbolic link
-    fn is_symlink(&self) -> bool {
-        self.unix_mode()
-            .is_some_and(|mode| mode & S_IFLNK == S_IFLNK)
-    }
-
-    /// Returns whether the file is a normal file (i.e. not a directory or symlink)
-    fn is_file(&self) -> bool {
-        !self.is_dir() && !self.is_symlink()
-    }
-
-    /// Get unix mode for the file
-    fn unix_mode(&self) -> Option<u32> {
-        self.data().unix_mode()
-    }
-
-    /// Get the CRC32 hash of the original file
-    fn crc32(&self) -> u32 {
-        self.data().crc32
-    }
-
-    /// Get the extra data of the zip header for this file
-    fn extra_data(&self) -> Option<&[u8]> {
-        self.data().extra_field.as_deref().map(|v| v.as_ref())
-    }
-
-    /// Get the starting offset of the data of the compressed file
-    fn data_start(&self) -> u64 {
-        *self.data().data_start.get().unwrap()
-    }
-
-    /// Get the starting offset of the zip header for this file
-    fn header_start(&self) -> u64 {
-        self.data().header_start
-    }
-    /// Get the starting offset of the zip header in the central directory for this file
-    fn central_header_start(&self) -> u64 {
-        self.data().central_header_start
-    }
-
-    /// iterate through all extra fields
-    fn extra_data_fields(&self) -> slice::Iter<'_, ExtraField> {
-        self.data().extra_fields.iter()
-    }
-}
-
-impl<'a, R> sealed_data::ArchiveData for ZipEntry<'a, R> {
-    fn data(&self) -> &ZipFileData {
+impl<'a, R> HasZipMetadata for ZipEntry<'a, R> {
+    fn get_metadata(&self) -> &ZipFileData {
         self.data
     }
 }
 
-impl<'a, R> ArchiveEntry for ZipEntry<'a, R> where R: Read {}
+impl<'a, R> EntryData for ZipEntry<'a, R> {}
 
 pub(crate) fn find_entry_content_range<R>(
     data: &ZipFileData,
@@ -475,12 +324,11 @@ where
 }
 
 pub mod streaming {
-    use super::{
-        construct_decompressing_reader, sealed_data, ArchiveEntry, Crc32Reader, ZipError,
-        ZipFileData, ZipResult,
-    };
+    use super::{construct_decompressing_reader, Crc32Reader, ZipError, ZipFileData, ZipResult};
 
-    use crate::read::{central_header_to_zip_file_inner, parse_extra_field};
+    use crate::read::{
+        central_header_to_zip_file_inner, parse_extra_field, EntryData, HasZipMetadata,
+    };
     use crate::spec::{self, FixedSizeBlock};
     use crate::types::{ZipCentralEntryBlock, ZipLocalEntryBlock};
 
@@ -723,30 +571,30 @@ pub mod streaming {
         }
     }
 
-    impl<R> sealed_data::ArchiveData for StreamingZipEntry<R> {
-        fn data(&self) -> &ZipFileData {
+    impl<R> HasZipMetadata for StreamingZipEntry<R> {
+        fn get_metadata(&self) -> &ZipFileData {
             &self.data
         }
     }
 
-    impl<R> ArchiveEntry for StreamingZipEntry<R> where R: Read {}
+    impl<R> EntryData for StreamingZipEntry<R> {}
 
     /// Additional metadata for the file.
     #[derive(Debug)]
     pub struct ZipStreamFileMetadata(ZipFileData);
 
-    impl sealed_data::ArchiveData for ZipStreamFileMetadata {
-        fn data(&self) -> &ZipFileData {
+    impl HasZipMetadata for ZipStreamFileMetadata {
+        fn get_metadata(&self) -> &ZipFileData {
             let Self(data) = self;
             data
         }
     }
+
+    impl EntryData for ZipStreamFileMetadata {}
 
     impl Read for ZipStreamFileMetadata {
         fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
             Ok(0)
         }
     }
-
-    impl ArchiveEntry for ZipStreamFileMetadata {}
 }
